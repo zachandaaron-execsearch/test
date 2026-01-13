@@ -1,7 +1,7 @@
 import { NextAuthOptions } from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
 import bcrypt from 'bcryptjs';
-import { getUserByEmail } from './db';
+import { getUserByEmailAsync } from './db';
 
 export const authOptions: NextAuthOptions = {
   providers: [
@@ -16,7 +16,7 @@ export const authOptions: NextAuthOptions = {
           throw new Error('Please provide email and password');
         }
 
-        const user = getUserByEmail(credentials.email);
+        const user = await getUserByEmailAsync(credentials.email);
         if (!user) {
           throw new Error('Invalid email or password');
         }
