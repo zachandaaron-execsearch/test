@@ -1,11 +1,12 @@
 import type { Metadata } from "next";
+import { Inter } from "next/font/google";
 import "./globals.css";
-import SessionProvider from "@/components/SessionProvider";
-import Navbar from "@/components/Navbar";
+
+const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "SportsPicksPro - Expert Sports Picks & Analysis",
-  description: "Get winning sports picks from expert analysts. Subscribe for daily picks across NFL, NBA, MLB, NHL and more.",
+  title: "Power Newsletter Workflow",
+  description: "Guided workflow for creating clinical operations newsletters",
 };
 
 export default function RootLayout({
@@ -15,11 +16,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className="antialiased bg-gray-950 text-white min-h-screen font-sans">
-        <SessionProvider>
-          <Navbar />
-          <main>{children}</main>
-        </SessionProvider>
+      <body className={`${inter.className} antialiased`}>
+        {children}
       </body>
     </html>
   );
