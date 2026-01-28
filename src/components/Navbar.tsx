@@ -33,6 +33,12 @@ export default function Navbar() {
             >
               Pricing
             </Link>
+            <Link
+              href="/newsletter"
+              className="text-blue-400 hover:text-blue-300 px-3 py-2 rounded-md text-sm font-medium"
+            >
+              Newsletter
+            </Link>
 
             {status === 'loading' ? (
               <div className="w-8 h-8 rounded-full bg-gray-700 animate-pulse" />
@@ -115,6 +121,9 @@ export default function Navbar() {
               </Link>
               <Link href="/pricing" className="text-gray-300 hover:text-white px-3 py-2">
                 Pricing
+              </Link>
+              <Link href="/newsletter" className="text-blue-400 hover:text-blue-300 px-3 py-2">
+                Newsletter
               </Link>
               {session ? (
                 <>
