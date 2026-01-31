@@ -1,17 +1,19 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
-type WorkflowStep = 'start' | 'discovery' | 'handoff' | 'creation' | 'review';
+type WorkflowStep = 'start' | 'discovery' | 'brief' | 'creation' | 'review';
+
+interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+}
 
 interface ChecklistItem {
   id: string;
   label: string;
   checked: boolean;
 }
-
-const DISCOVERY_URL = 'https://claude.ai/project/019bfc23-8d94-7506-8f9a-b56269573c49';
-const NEWSLETTER_URL = 'https://claude.ai/project/01993dc0-7bf0-724a-9437-815a61c7ac69';
 
 const initialChecklist: ChecklistItem[] = [
   { id: 'clinical', label: 'All clinical claims fact-checked', checked: false },
@@ -27,19 +29,26 @@ const initialChecklist: ChecklistItem[] = [
 export default function Home() {
   const [currentStep, setCurrentStep] = useState<WorkflowStep>('start');
   const [sourceType, setSourceType] = useState('');
+  const [discoveryMessages, setDiscoveryMessages] = useState<Message[]>([]);
+  const [creationMessages, setCreationMessages] = useState<Message[]>([]);
   const [briefContent, setBriefContent] = useState('');
   const [finalDraft, setFinalDraft] = useState('');
   const [checklist, setChecklist] = useState<ChecklistItem[]>(initialChecklist);
   const [isLoaded, setIsLoaded] = useState(false);
-  const [copySuccess, setCopySuccess] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [inputValue, setInputValue] = useState('');
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Load saved state
   useEffect(() => {
-    const saved = localStorage.getItem('power-newsletter-workflow');
+    const saved = localStorage.getItem('power-newsletter-v2');
     if (saved) {
       try {
         const data = JSON.parse(saved);
         setCurrentStep(data.currentStep || 'start');
         setSourceType(data.sourceType || '');
+        setDiscoveryMessages(data.discoveryMessages || []);
+        setCreationMessages(data.creationMessages || []);
         setBriefContent(data.briefContent || '');
         setFinalDraft(data.finalDraft || '');
         setChecklist(data.checklist || initialChecklist);
@@ -50,26 +59,36 @@ export default function Home() {
     setIsLoaded(true);
   }, []);
 
+  // Save state
   useEffect(() => {
     if (isLoaded) {
-      localStorage.setItem('power-newsletter-workflow', JSON.stringify({
+      localStorage.setItem('power-newsletter-v2', JSON.stringify({
         currentStep,
         sourceType,
+        discoveryMessages,
+        creationMessages,
         briefContent,
         finalDraft,
         checklist,
       }));
     }
-  }, [currentStep, sourceType, briefContent, finalDraft, checklist, isLoaded]);
+  }, [currentStep, sourceType, discoveryMessages, creationMessages, briefContent, finalDraft, checklist, isLoaded]);
+
+  // Scroll to bottom of messages
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [discoveryMessages, creationMessages]);
 
   const resetWorkflow = () => {
     if (confirm('Start a new newsletter? This will clear all saved progress.')) {
       setCurrentStep('start');
       setSourceType('');
+      setDiscoveryMessages([]);
+      setCreationMessages([]);
       setBriefContent('');
       setFinalDraft('');
       setChecklist(initialChecklist);
-      setCopySuccess(false);
+      setInputValue('');
     }
   };
 
@@ -79,13 +98,91 @@ export default function Home() {
     ));
   };
 
-  const copyToClipboard = async () => {
+  const sendMessage = async (mode: 'discovery' | 'creation') => {
+    if (!inputValue.trim() || isLoading) return;
+
+    const userMessage: Message = { role: 'user', content: inputValue };
+    const currentMessages = mode === 'discovery' ? discoveryMessages : creationMessages;
+    const setMessages = mode === 'discovery' ? setDiscoveryMessages : setCreationMessages;
+
+    const newMessages = [...currentMessages, userMessage];
+    setMessages(newMessages);
+    setInputValue('');
+    setIsLoading(true);
+
     try {
-      await navigator.clipboard.writeText(briefContent);
-      setCopySuccess(true);
-      setTimeout(() => setCopySuccess(false), 2000);
-    } catch (err) {
-      console.error('Failed to copy', err);
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: newMessages.map(m => ({ role: m.role, content: m.content })),
+          mode,
+          sourceType: mode === 'discovery' ? sourceType : undefined,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      const assistantMessage: Message = { role: 'assistant', content: data.response };
+      setMessages([...newMessages, assistantMessage]);
+
+      // Auto-extract brief if it looks like one was generated
+      if (mode === 'discovery' && data.response.includes('NEWSLETTER BRIEF:')) {
+        const briefMatch = data.response.match(/\*\*NEWSLETTER BRIEF:[\s\S]*/);
+        if (briefMatch) {
+          setBriefContent(briefMatch[0]);
+        }
+      }
+
+      // Auto-extract newsletter draft
+      if (mode === 'creation' && data.response.length > 500) {
+        setFinalDraft(data.response);
+      }
+
+    } catch (error) {
+      console.error('Failed to send message:', error);
+      const errorMessage: Message = {
+        role: 'assistant',
+        content: 'Sorry, there was an error connecting to the AI. Please try again.'
+      };
+      setMessages([...newMessages, errorMessage]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const startDiscovery = () => {
+    setCurrentStep('discovery');
+    if (discoveryMessages.length === 0) {
+      // Send initial context message
+      const sourceLabels: Record<string, string> = {
+        podcast: 'a podcast transcript',
+        data: 'internal data/analytics',
+        customer: 'customer insights',
+        brainstorm: 'a brainstorm or concept',
+        news: 'industry news',
+      };
+      const initialMessage: Message = {
+        role: 'assistant',
+        content: `Great, you're working with ${sourceLabels[sourceType] || 'source material'}. Let's develop this into a compelling newsletter topic.\n\nTo get started: What's the core subject or finding you want to explore? Give me a brief overview of what you're working with.`
+      };
+      setDiscoveryMessages([initialMessage]);
+    }
+  };
+
+  const startCreation = () => {
+    setCurrentStep('creation');
+    if (creationMessages.length === 0 && briefContent) {
+      // Initialize with the brief
+      const initialMessage: Message = {
+        role: 'assistant',
+        content: `I've received the narrative brief. I'll write a newsletter draft based on this guidance.\n\nBefore I begin, do you have any additional context, transcript excerpts, or specific data points you'd like me to incorporate? Or should I proceed with drafting based on the brief?`
+      };
+      setCreationMessages([initialMessage]);
     }
   };
 
@@ -94,7 +191,7 @@ export default function Home() {
   const steps: { key: WorkflowStep; label: string; number: number }[] = [
     { key: 'start', label: 'Start', number: 1 },
     { key: 'discovery', label: 'Discovery', number: 2 },
-    { key: 'handoff', label: 'Handoff', number: 3 },
+    { key: 'brief', label: 'Brief', number: 3 },
     { key: 'creation', label: 'Creation', number: 4 },
     { key: 'review', label: 'Review', number: 5 },
   ];
@@ -110,10 +207,10 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-950 text-white">
+    <div className="min-h-screen bg-gray-950 text-white flex flex-col">
       {/* Header */}
       <div className="border-b border-gray-800 bg-gray-900">
-        <div className="max-w-4xl mx-auto px-6 py-4 flex justify-between items-center">
+        <div className="max-w-5xl mx-auto px-6 py-4 flex justify-between items-center">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center font-bold text-sm">
               P
@@ -131,18 +228,28 @@ export default function Home() {
 
       {/* Progress Steps */}
       <div className="border-b border-gray-800 bg-gray-900/50">
-        <div className="max-w-4xl mx-auto px-6 py-4">
+        <div className="max-w-5xl mx-auto px-6 py-4">
           <div className="flex items-center justify-between">
             {steps.map((step, index) => (
               <div key={step.key} className="flex items-center">
                 <button
-                  onClick={() => setCurrentStep(step.key)}
+                  onClick={() => {
+                    if (step.key === 'discovery' && sourceType) startDiscovery();
+                    else if (step.key === 'creation' && briefContent) startCreation();
+                    else setCurrentStep(step.key);
+                  }}
+                  disabled={
+                    (step.key === 'discovery' && !sourceType) ||
+                    (step.key === 'brief' && discoveryMessages.length === 0) ||
+                    (step.key === 'creation' && !briefContent) ||
+                    (step.key === 'review' && !finalDraft)
+                  }
                   className={`flex items-center gap-2 px-3 py-1.5 rounded-full transition-all ${
                     currentStep === step.key
                       ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20'
                       : index < currentStepIndex
                       ? 'bg-green-600/20 text-green-400 hover:bg-green-600/30'
-                      : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                      : 'bg-gray-800 text-gray-400 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed'
                   }`}
                 >
                   <span className="w-6 h-6 rounded-full bg-black/20 flex items-center justify-center text-sm font-medium">
@@ -162,11 +269,11 @@ export default function Home() {
       </div>
 
       {/* Main Content */}
-      <div className="max-w-4xl mx-auto px-6 py-8">
+      <div className="flex-1 flex flex-col max-w-5xl mx-auto w-full px-6 py-6">
 
         {/* Step 1: Start */}
         {currentStep === 'start' && (
-          <div className="space-y-6">
+          <div className="space-y-6 max-w-2xl mx-auto w-full">
             <div>
               <h2 className="text-2xl font-bold mb-2">What are you working with?</h2>
               <p className="text-gray-400">Select your source material type to get started.</p>
@@ -201,7 +308,7 @@ export default function Home() {
             </div>
 
             <button
-              onClick={() => setCurrentStep('discovery')}
+              onClick={startDiscovery}
               disabled={!sourceType}
               className="w-full py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed rounded-xl font-medium transition-all hover:shadow-lg hover:shadow-blue-600/20"
             >
@@ -210,43 +317,63 @@ export default function Home() {
           </div>
         )}
 
-        {/* Step 2: Discovery */}
+        {/* Step 2: Discovery Chat */}
         {currentStep === 'discovery' && (
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-2xl font-bold mb-2">Step 1: Topic Discovery</h2>
-              <p className="text-gray-400">
-                Work with the Discovery Agent to develop your angle and create a narrative brief.
-              </p>
+          <div className="flex-1 flex flex-col">
+            <div className="mb-4">
+              <h2 className="text-xl font-bold">Topic Discovery</h2>
+              <p className="text-gray-400 text-sm">Chat with the Discovery Agent to develop your newsletter angle.</p>
             </div>
 
-            <div className="bg-gray-900 border border-gray-700 rounded-xl p-6 space-y-4">
-              <h3 className="font-semibold flex items-center gap-2">
-                <span className="w-6 h-6 bg-blue-600 rounded-full flex items-center justify-center text-xs">?</span>
-                Instructions
-              </h3>
-              <ol className="list-decimal list-inside space-y-2 text-gray-300 ml-2">
-                <li>Click the button below to open the Discovery Project</li>
-                <li>Tell the agent you&apos;re working with: <span className="text-blue-400 font-medium">{sourceType || 'your source'}</span></li>
-                <li>Answer the discovery questions (5-10 questions)</li>
-                <li>When ready, confirm to receive the Narrative Brief</li>
-                <li>Copy the entire brief output</li>
-              </ol>
+            {/* Messages */}
+            <div className="flex-1 overflow-y-auto bg-gray-900 rounded-xl border border-gray-700 mb-4 p-4 space-y-4 min-h-[400px] max-h-[500px]">
+              {discoveryMessages.map((msg, i) => (
+                <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[80%] rounded-xl px-4 py-3 ${
+                    msg.role === 'user'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-800 text-gray-100'
+                  }`}>
+                    <div className="whitespace-pre-wrap text-sm">{msg.content}</div>
+                  </div>
+                </div>
+              ))}
+              {isLoading && (
+                <div className="flex justify-start">
+                  <div className="bg-gray-800 rounded-xl px-4 py-3">
+                    <div className="flex gap-1">
+                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" />
+                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }} />
+                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }} />
+                    </div>
+                  </div>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
             </div>
 
-            <a
-              href={DISCOVERY_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center justify-center gap-2 w-full py-3 bg-purple-600 hover:bg-purple-700 rounded-xl font-medium transition-all hover:shadow-lg hover:shadow-purple-600/20"
-            >
-              Open Discovery Project
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-              </svg>
-            </a>
-
+            {/* Input */}
             <div className="flex gap-3">
+              <input
+                type="text"
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendMessage('discovery')}
+                placeholder="Type your message..."
+                disabled={isLoading}
+                className="flex-1 bg-gray-900 border border-gray-700 rounded-xl px-4 py-3 text-gray-100 placeholder-gray-500 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none disabled:opacity-50"
+              />
+              <button
+                onClick={() => sendMessage('discovery')}
+                disabled={isLoading || !inputValue.trim()}
+                className="px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 rounded-xl font-medium transition-colors"
+              >
+                Send
+              </button>
+            </div>
+
+            {/* Navigation */}
+            <div className="flex gap-3 mt-4">
               <button
                 onClick={() => setCurrentStep('start')}
                 className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 rounded-xl font-medium transition-colors"
@@ -254,23 +381,22 @@ export default function Home() {
                 Back
               </button>
               <button
-                onClick={() => setCurrentStep('handoff')}
-                className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 rounded-xl font-medium transition-all hover:shadow-lg hover:shadow-blue-600/20"
+                onClick={() => setCurrentStep('brief')}
+                disabled={discoveryMessages.length < 4}
+                className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 rounded-xl font-medium transition-colors"
               >
-                I have the brief
+                Review Brief
               </button>
             </div>
           </div>
         )}
 
-        {/* Step 3: Handoff */}
-        {currentStep === 'handoff' && (
-          <div className="space-y-6">
+        {/* Step 3: Brief Review */}
+        {currentStep === 'brief' && (
+          <div className="space-y-6 max-w-3xl mx-auto w-full">
             <div>
-              <h2 className="text-2xl font-bold mb-2">Save Your Brief</h2>
-              <p className="text-gray-400">
-                Paste the Narrative Brief from the Discovery Agent. This saves your progress.
-              </p>
+              <h2 className="text-2xl font-bold mb-2">Review & Edit Brief</h2>
+              <p className="text-gray-400">Review the narrative brief before sending to the Newsletter Agent.</p>
             </div>
 
             <div>
@@ -280,21 +406,13 @@ export default function Home() {
               <textarea
                 value={briefContent}
                 onChange={(e) => setBriefContent(e.target.value)}
-                placeholder="Paste the full Narrative Brief here..."
-                className="w-full h-72 bg-gray-900 border border-gray-700 rounded-xl p-4 text-gray-100 placeholder-gray-500 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none resize-none font-mono text-sm"
+                placeholder="The narrative brief will appear here after your discovery conversation. You can also paste or write your own."
+                className="w-full h-80 bg-gray-900 border border-gray-700 rounded-xl p-4 text-gray-100 placeholder-gray-500 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none resize-none font-mono text-sm"
               />
               <div className="flex justify-between items-center mt-2">
                 <div className="text-sm text-gray-500">
                   {briefContent.length > 0 && `${briefContent.length.toLocaleString()} characters`}
                 </div>
-                {briefContent.length > 100 && (
-                  <div className="text-sm text-green-500 flex items-center gap-1">
-                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                    </svg>
-                    Auto-saved
-                  </div>
-                )}
               </div>
             </div>
 
@@ -303,10 +421,10 @@ export default function Home() {
                 onClick={() => setCurrentStep('discovery')}
                 className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 rounded-xl font-medium transition-colors"
               >
-                Back
+                Back to Discovery
               </button>
               <button
-                onClick={() => setCurrentStep('creation')}
+                onClick={startCreation}
                 disabled={!briefContent.trim()}
                 className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed rounded-xl font-medium transition-all hover:shadow-lg hover:shadow-blue-600/20"
               >
@@ -316,77 +434,99 @@ export default function Home() {
           </div>
         )}
 
-        {/* Step 4: Creation */}
+        {/* Step 4: Creation Chat */}
         {currentStep === 'creation' && (
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-2xl font-bold mb-2">Step 2: Newsletter Creation</h2>
-              <p className="text-gray-400">
-                Use the Newsletter Agent to write your draft based on the brief.
-              </p>
+          <div className="flex-1 flex flex-col">
+            <div className="mb-4">
+              <h2 className="text-xl font-bold">Newsletter Creation</h2>
+              <p className="text-gray-400 text-sm">Work with the Newsletter Agent to write your draft.</p>
             </div>
 
-            <div className="bg-gray-900 border border-gray-700 rounded-xl p-6 space-y-4">
-              <h3 className="font-semibold flex items-center gap-2">
-                <span className="w-6 h-6 bg-blue-600 rounded-full flex items-center justify-center text-xs">?</span>
-                Instructions
-              </h3>
-              <ol className="list-decimal list-inside space-y-2 text-gray-300 ml-2">
-                <li>Click the button below to open the Newsletter Project</li>
-                <li>Paste your Narrative Brief (use the copy button below)</li>
-                <li>Upload any supporting files (transcripts, data exports)</li>
-                <li>Review the draft and request revisions as needed</li>
-                <li>Copy the final draft when satisfied</li>
-              </ol>
+            {/* Brief Preview */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl p-3 mb-4">
+              <div className="text-xs text-gray-500 mb-1">Brief Summary</div>
+              <div className="text-sm text-gray-300 line-clamp-2">{briefContent.slice(0, 200)}...</div>
             </div>
 
-            <div>
-              <div className="flex justify-between items-center mb-2">
-                <label className="text-sm font-medium text-gray-300">
-                  Your Narrative Brief
-                </label>
-                <button
-                  onClick={copyToClipboard}
-                  className={`text-sm px-3 py-1 rounded-md transition-all ${
-                    copySuccess
-                      ? 'bg-green-600/20 text-green-400'
-                      : 'text-blue-400 hover:text-blue-300 hover:bg-blue-600/10'
-                  }`}
-                >
-                  {copySuccess ? '✓ Copied!' : 'Copy to clipboard'}
-                </button>
-              </div>
-              <div className="bg-gray-900 border border-gray-700 rounded-xl p-4 max-h-48 overflow-y-auto">
-                <pre className="text-sm text-gray-300 whitespace-pre-wrap font-mono">
-                  {briefContent || 'No brief saved'}
-                </pre>
-              </div>
+            {/* Messages */}
+            <div className="flex-1 overflow-y-auto bg-gray-900 rounded-xl border border-gray-700 mb-4 p-4 space-y-4 min-h-[350px] max-h-[450px]">
+              {creationMessages.map((msg, i) => (
+                <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[80%] rounded-xl px-4 py-3 ${
+                    msg.role === 'user'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-800 text-gray-100'
+                  }`}>
+                    <div className="whitespace-pre-wrap text-sm">{msg.content}</div>
+                  </div>
+                </div>
+              ))}
+              {isLoading && (
+                <div className="flex justify-start">
+                  <div className="bg-gray-800 rounded-xl px-4 py-3">
+                    <div className="flex gap-1">
+                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" />
+                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }} />
+                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }} />
+                    </div>
+                  </div>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
             </div>
 
-            <a
-              href={NEWSLETTER_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center justify-center gap-2 w-full py-3 bg-purple-600 hover:bg-purple-700 rounded-xl font-medium transition-all hover:shadow-lg hover:shadow-purple-600/20"
-            >
-              Open Newsletter Project
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-              </svg>
-            </a>
-
+            {/* Input */}
             <div className="flex gap-3">
+              <input
+                type="text"
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendMessage('creation')}
+                placeholder="Type your message or paste additional context..."
+                disabled={isLoading}
+                className="flex-1 bg-gray-900 border border-gray-700 rounded-xl px-4 py-3 text-gray-100 placeholder-gray-500 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none disabled:opacity-50"
+              />
               <button
-                onClick={() => setCurrentStep('handoff')}
+                onClick={() => sendMessage('creation')}
+                disabled={isLoading || !inputValue.trim()}
+                className="px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 rounded-xl font-medium transition-colors"
+              >
+                Send
+              </button>
+            </div>
+
+            {/* Quick Actions */}
+            <div className="flex gap-2 mt-3">
+              <button
+                onClick={() => {
+                  setInputValue(`Please write the newsletter draft based on this brief:\n\n${briefContent}`);
+                }}
+                className="text-sm px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-gray-300"
+              >
+                Send Brief to Agent
+              </button>
+              <button
+                onClick={() => setInputValue('Please revise to be more concise and under 800 words.')}
+                className="text-sm px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-gray-300"
+              >
+                Request Revision
+              </button>
+            </div>
+
+            {/* Navigation */}
+            <div className="flex gap-3 mt-4">
+              <button
+                onClick={() => setCurrentStep('brief')}
                 className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 rounded-xl font-medium transition-colors"
               >
                 Back
               </button>
               <button
                 onClick={() => setCurrentStep('review')}
-                className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 rounded-xl font-medium transition-all hover:shadow-lg hover:shadow-blue-600/20"
+                disabled={!finalDraft && creationMessages.length < 2}
+                className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 rounded-xl font-medium transition-colors"
               >
-                I have the draft
+                Review & Finish
               </button>
             </div>
           </div>
@@ -394,24 +534,33 @@ export default function Home() {
 
         {/* Step 5: Review */}
         {currentStep === 'review' && (
-          <div className="space-y-6">
+          <div className="space-y-6 max-w-3xl mx-auto w-full">
             <div>
               <h2 className="text-2xl font-bold mb-2">Final Review</h2>
-              <p className="text-gray-400">
-                Complete the checklist before publishing.
-              </p>
+              <p className="text-gray-400">Complete the checklist and copy your final draft.</p>
             </div>
 
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">
-                Final Draft <span className="text-gray-500">(optional - for your records)</span>
+                Final Newsletter Draft
               </label>
               <textarea
                 value={finalDraft}
                 onChange={(e) => setFinalDraft(e.target.value)}
-                placeholder="Paste the final newsletter draft here..."
-                className="w-full h-48 bg-gray-900 border border-gray-700 rounded-xl p-4 text-gray-100 placeholder-gray-500 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none resize-none font-mono text-sm"
+                placeholder="Your newsletter draft will appear here..."
+                className="w-full h-64 bg-gray-900 border border-gray-700 rounded-xl p-4 text-gray-100 placeholder-gray-500 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none resize-none font-mono text-sm"
               />
+              <div className="flex justify-between items-center mt-2">
+                <div className="text-sm text-gray-500">
+                  {finalDraft.split(/\s+/).filter(Boolean).length} words
+                </div>
+                <button
+                  onClick={() => navigator.clipboard.writeText(finalDraft)}
+                  className="text-sm text-blue-400 hover:text-blue-300 px-3 py-1 rounded-md hover:bg-blue-600/10"
+                >
+                  Copy to clipboard
+                </button>
+              </div>
             </div>
 
             <div className="bg-gray-900 border border-gray-700 rounded-xl p-6">
@@ -472,7 +621,7 @@ export default function Home() {
                     {checklist.filter(i => !i.checked).length}
                   </div>
                   <p className="text-yellow-400 font-medium">
-                    {checklist.filter(i => !i.checked).length} item{checklist.filter(i => !i.checked).length !== 1 ? 's' : ''} remaining before publish
+                    {checklist.filter(i => !i.checked).length} item{checklist.filter(i => !i.checked).length !== 1 ? 's' : ''} remaining
                   </p>
                 </>
               )}
@@ -498,8 +647,8 @@ export default function Home() {
       </div>
 
       {/* Footer */}
-      <div className="border-t border-gray-800 mt-12">
-        <div className="max-w-4xl mx-auto px-6 py-4 text-center text-sm text-gray-500">
+      <div className="border-t border-gray-800">
+        <div className="max-w-5xl mx-auto px-6 py-4 text-center text-sm text-gray-500">
           Power Newsletter Workflow
         </div>
       </div>
